@@ -20,6 +20,7 @@ import { SearchModule } from './search/search.module';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { MetricsInterceptor } from './common/interceptors/metrics.interceptor';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
+import { AppController } from './app.controller';
 
 @Module({
   imports: [
@@ -41,6 +42,7 @@ import { HttpExceptionFilter } from './common/filters/http-exception.filter';
     EnrichmentModule,
     SearchModule,
   ],
+  controllers: [AppController],
   providers: [
     {
       provide: APP_FILTER,
@@ -60,4 +62,4 @@ import { HttpExceptionFilter } from './common/filters/http-exception.filter';
     },
   ],
 })
-export class AppModule {}
+export class AppModule { }
