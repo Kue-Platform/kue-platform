@@ -6,27 +6,27 @@ Kue Platform is a professional network intelligence tool designed to help you le
 
 ```mermaid
 graph TD
-    Client[Client App (Next.js/React)]
+    Client["Client App (Next.js/React)"]
     
     subgraph "Kue Platform Backend (NestJS)"
-        API[API Gateway / Controllers]
-        Auth[Auth Service]
-        Sync[Sync Engine]
-        GraphService[Graph Service]
-        SearchService[Search Service]
-        Enrich[Enrichment Service]
+        API["API Gateway / Controllers"]
+        Auth["Auth Service"]
+        Sync["Sync Engine"]
+        GraphService["Graph Service"]
+        SearchService["Search Service"]
+        Enrich["Enrichment Service"]
     end
     
     subgraph "Data Layer"
-        Supabase[(Supabase - PostgreSQL)]
-        Neo4j[(Neo4j - Graph DB)]
-        Redis[(Redis - Cache/Queue)]
+        Supabase[("Supabase - PostgreSQL")]
+        Neo4j[("Neo4j - Graph DB")]
+        Redis[("Redis - Cache/Queue")]
     end
     
     subgraph "External Services"
-        Google[Google APIs (Gmail, People, Calendar)]
-        Anthropic[Anthropic Claude (AI)]
-        Inngest[Inngest (Async Queues)]
+        Google["Google APIs (Gmail, People, Calendar)"]
+        Anthropic["Anthropic Claude (AI)"]
+        Inngest["Inngest (Async Queues)"]
     end
 
     Client -->|HTTPS| API
