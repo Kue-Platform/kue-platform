@@ -20,7 +20,12 @@ async function bootstrap() {
 
   // Configure CORS to allow credentials (cookies)
   app.enableCors({
-    origin: configService.get<string>('FRONTEND_URL') || 'http://localhost:8081',
+    origin: [
+      configService.get<string>('FRONTEND_URL'),
+      'http://localhost:8081',
+      'https://kue-prototype.vercel.app',
+      'https://kue-platform.vercel.app',
+    ].filter((origin) => !!origin),
     credentials: true,
   });
 
