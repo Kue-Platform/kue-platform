@@ -41,7 +41,218 @@ export class AuthService {
   }
 
   /**
-   * Generate the Google OAuth consent URL
+   * Send OTP code to user's email (works for both new and existing users)
+   */
+  async sendOtp(email: string): Promise<{ success: boolean; message: string }> {
+    try {
+      const { error } = await this.supabase.getClient().auth.signInWithOtp({
+        email,
+        options: {
+          shouldCreateUser: true, // Creates user if doesn't exist
+        },
+      });
+
+      if (error) {
+        this.logger.error('Failed to send OTP', { email, error: error.message });
+        throw new Error(`Failed to send OTP: ${error.message}`);
+      }
+
+      this.logger.info('OTP sent successfully', { email });
+      this.posthog.capture(email, PostHogEvents.AUTH_OTP_SENT, { email });
+
+      return {
+        success: true,
+        message: 'Verification code sent to your email',
+      };
+    } catch (error) {
+      this.sentry.captureException(error as Error, { email, context: 'send_otp' });
+      throw error;
+    }
+  }
+
+  /**
+   * Verify OTP code and create/authenticate user session
+   */
+  async verifyOtp(email: string, token: string): Promise<{
+    accessToken: string;
+    refreshToken: string;
+    user: {
+      id: string;
+      email: string;
+      createdAt: string;
+    };
+    isNewUser: boolean;
+  }> {
+    try {
+      const { data, error } = await this.supabase.getClient().auth.verifyOtp({
+        email,
+        token,
+        type: 'email',
+      });
+
+      if (error || !data.session || !data.user) {
+        this.logger.error('OTP verification failed', { email, error: error?.message });
+        throw new UnauthorizedException('Invalid or expired verification code');
+      }
+
+      // Check if this is a new user (created just now)
+      const isNewUser = new Date(data.user.created_at).getTime() > Date.now() - 60000; // Within last minute
+
+      this.logger.info('OTP verified successfully', {
+        userId: data.user.id,
+        email,
+        isNewUser,
+      });
+
+      this.posthog.capture(data.user.id, PostHogEvents.AUTH_OTP_VERIFIED, {
+        email,
+        isNewUser,
+      });
+
+      if (isNewUser) {
+        this.posthog.capture(data.user.id, PostHogEvents.USER_SIGNED_UP, {
+          email,
+          method: 'otp',
+        });
+      } else {
+        this.posthog.capture(data.user.id, PostHogEvents.USER_SIGNED_IN, {
+          email,
+          method: 'otp',
+        });
+      }
+
+      return {
+        accessToken: data.session.access_token,
+        refreshToken: data.session.refresh_token,
+        user: {
+          id: data.user.id,
+          email: data.user.email!,
+          createdAt: data.user.created_at,
+        },
+        isNewUser,
+      };
+    } catch (error) {
+      this.sentry.captureException(error as Error, { email, context: 'verify_otp' });
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
+      throw new UnauthorizedException('Failed to verify code');
+    }
+  }
+
+  /**
+   * Exchange Supabase access token for backend session
+   */
+  async exchangeSession(accessToken: string): Promise<{
+    user: {
+      id: string;
+      email: string;
+      createdAt: string;
+    };
+    isNewUser: boolean;
+  }> {
+    try {
+      // Verify the token with Supabase
+      const {
+        data: { user },
+        error,
+      } = await this.supabase.getClient().auth.getUser(accessToken);
+
+      if (error || !user) {
+        this.logger.error('Token exchange failed', { error: error?.message });
+        throw new UnauthorizedException('Invalid or expired token');
+      }
+
+      // Check if this is a new user (created within last minute)
+      const isNewUser = new Date(user.created_at).getTime() > Date.now() - 60000;
+
+      this.logger.info('Token exchange successful', {
+        userId: user.id,
+        email: user.email,
+        isNewUser,
+      });
+
+      // Track sign-in event
+      if (isNewUser) {
+        this.posthog.capture(user.id, PostHogEvents.USER_SIGNED_UP, {
+          email: user.email,
+          method: 'oauth_google',
+        });
+      } else {
+        this.posthog.capture(user.id, PostHogEvents.USER_SIGNED_IN, {
+          email: user.email,
+          method: 'oauth_google',
+        });
+      }
+
+      return {
+        user: {
+          id: user.id,
+          email: user.email!,
+          createdAt: user.created_at,
+        },
+        isNewUser,
+      };
+    } catch (error) {
+      this.sentry.captureException(error as Error, { context: 'exchange_session' });
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
+      throw new UnauthorizedException('Failed to exchange token');
+    }
+  }
+
+  /**
+   * Check if an email already exists in the system (optional helper)
+   */
+  async checkEmailExists(email: string): Promise<boolean> {
+    try {
+      // Check in Supabase auth.users table using admin API
+      const { data, error } = await this.supabase.getClient().auth.admin.listUsers();
+
+      if (error) {
+        this.logger.error('Failed to check email existence', { email, error: error.message });
+        return false;
+      }
+
+      // Check if any user has this email
+      const userExists = data.users.some(user => user.email?.toLowerCase() === email.toLowerCase());
+
+      return userExists;
+    } catch (error) {
+      this.logger.error('Error checking email existence', {
+        email,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      // If error, assume email doesn't exist
+      return false;
+    }
+  }
+
+  /**
+   * Generate Supabase OAuth (Google) sign-in URL for frontend authentication
+   */
+  async getGoogleSignInUrl(redirectTo: string = 'http://localhost:8081/'): Promise<string> {
+    const { data, error } = await this.supabase.getClient().auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo,
+        queryParams: {
+          access_type: 'offline',
+          prompt: 'consent',
+        },
+      },
+    });
+
+    if (error) {
+      this.logger.error('Failed to generate Google sign-in URL', { error: error.message });
+      throw new Error(`Failed to generate sign-in URL: ${error.message}`);
+    }
+    return data.url;
+  }
+
+  /**
+   * Generate the Google OAuth consent URL (for data sync)
    */
   getGoogleAuthUrl(state?: string): string {
     const url = this.oauth2Client.generateAuthUrl({

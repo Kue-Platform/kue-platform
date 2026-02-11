@@ -10,7 +10,7 @@ export class SupabaseService implements OnModuleInit {
   constructor(
     private configService: ConfigService,
     private logger: LoggerService,
-  ) {}
+  ) { }
 
   onModuleInit(): void {
     const url = this.configService.get<string>('SUPABASE_URL');
@@ -20,7 +20,10 @@ export class SupabaseService implements OnModuleInit {
 
     if (url && serviceRoleKey) {
       this.client = createClient(url, serviceRoleKey, {
-        auth: { autoRefreshToken: false, persistSession: false },
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false,
+        },
       });
       this.logger.info('Supabase client initialized', { url });
     } else {

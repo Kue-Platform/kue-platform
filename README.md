@@ -1,98 +1,142 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# Kue Platform - Professional Network Intelligence
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Kue Platform is a professional network intelligence tool designed to help you leverage your existing connections. By synchronizing with your email, calendar, and contacts, it builds a private knowledge graph of your professional network, allowing you to search for introductions, identify relationship strengths, and uncover hidden opportunities.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## High-Level Design (HLD)
 
-## Description
+```mermaid
+graph TD
+    Client[Client App (Next.js/React)]
+    
+    subgraph "Kue Platform Backend (NestJS)"
+        API[API Gateway / Controllers]
+        Auth[Auth Service]
+        Sync[Sync Engine]
+        GraphService[Graph Service]
+        SearchService[Search Service]
+        Enrich[Enrichment Service]
+    end
+    
+    subgraph "Data Layer"
+        Supabase[(Supabase - PostgreSQL)]
+        Neo4j[(Neo4j - Graph DB)]
+        Redis[(Redis - Cache/Queue)]
+    end
+    
+    subgraph "External Services"
+        Google[Google APIs (Gmail, People, Calendar)]
+        Anthropic[Anthropic Claude (AI)]
+        Inngest[Inngest (Async Queues)]
+    end
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
-
-## Project setup
-
-```bash
-$ npm install
+    Client -->|HTTPS| API
+    
+    API --> Auth
+    API --> Sync
+    API --> GraphService
+    API --> SearchService
+    
+    Auth -->|Store User| Supabase
+    Auth -->|OAuth| Google
+    
+    Sync -->|Fetch Data| Google
+    Sync -->|Queue Jobs| Inngest
+    Sync -->|Store Meta| Supabase
+    Sync -->|Store Relations| Neo4j
+    
+    Inngest -->|Trigger| Sync
+    
+    GraphService -->|Query| Neo4j
+    
+    SearchService -->|Vector/Graph Search| Neo4j
+    SearchService -->|Generate Response| Anthropic
 ```
 
-## Compile and run the project
+## Modules
+
+### 🔐 Authentication (`/auth`)
+Handles user identity and secure access.
+-   **OTP Login**: Passwordless email authentication for seamless entry.
+-   **Google OAuth**: Connects Google accounts to authorize data synchronization (Gmail, Contacts, Calendar).
+-   **Session Management**: JWT-based access and refresh tokens.
+
+### 🔄 Synchronization (`/sync`)
+The core engine that ingests data from external sources.
+-   **Gmail Sync**: Analyzes email metadata to identify connections and interaction frequency.
+-   **Contacts Sync**: Imports Google Contacts to build the base network.
+-   **Calendar Sync**: Tracks meetings to gauge relationship recency and strength.
+-   **Incremental Syncs**: Efficiently updates only changed data.
+
+### 🕸️ Graph (`/graph`)
+Manages the relationship data in Neo4j.
+-   **Person Nodes**: Represents individuals in your network.
+-   **Interaction Edges**: Represents emails, meetings, and other touchpoints.
+-   **Strength Calculation**: Algorithms to determine how close you are to a contact based on interaction frequency and recency.
+
+### 🔍 Search (`/search`)
+AI-powered natural language search interface.
+-   **Semantic Search**: Understands queries like "Investors in AI" or "Engineers at Google".
+-   **Intro Paths**: Finds the best path to a target person through mutual connections.
+-   **LLM Summarization**: Generates human-readable summaries of search results using Claude.
+
+### 🤖 Enrichment (`/enrichment`)
+Enhances contact data.
+-   **Profile Augmentation**: Fills in missing details like job titles, companies, and social profiles.
+-   **Deduplication**: Merges duplicate contacts across different sources.
+
+## Observability Stack
+
+We use a comprehensive suite of tools to monitor health, performance, and user behavior:
+
+| Tool | Purpose | Why we use it |
+|------|---------|---------------|
+| **Sentry** | Error Tracking | Real-time alerts for backend exceptions and performance bottlenecks. Integrated with NestJS to capture stack traces and context. |
+| **PostHog** | Analytics & Feature Flags | Tracks user events (e.g., "Sync Started", "Search Performed") to understand usage patterns. control feature rollouts. |
+| **BetterStack** | Logging | Centralized, structured logging (via Logtail). Allows querying logs across distributed services. |
+| **Grafana Cloud** | Metrics & Traces | Visualizes OpenTelemetry data. Dashboards for API latency, memory usage, and job queue depths. |
+| **OpenTelemetry** | Instrumentation | Vendor-neutral standard for collecting traces and metrics from the NestJS application. |
+
+## Technology Stack
+
+-   **Framework**: [NestJS](https://nestjs.com/) (Fastify adapter)
+-   **Language**: TypeScript
+-   **Database (Relational)**: [Supabase](https://supabase.com/) (PostgreSQL)
+-   **Database (Graph)**: [Neo4j Aura](https://neo4j.com/cloud/aura/)
+-   **Queue/Background Jobs**: [Inngest](https://www.inngest.com/)
+-   **AI/LLM**: [LangChain](https://js.langchain.com/) + [Anthropic Claude](https://www.anthropic.com/)
+-   **Cache/Rate Limit**: [Upstash Redis](https://upstash.com/)
+
+## Getting Started
+
+### Prerequisites
+-   Node.js (v18+)
+-   npm or pnpm
+-   Accounts for: Supabase, Neo4j, Inngest, Google Cloud Console, Anthropic.
+
+### 1. Environment Setup
+Copy the example environment file and fill in your credentials:
 
 ```bash
-# development
-$ npm run start
-
-# watch mode
-$ npm run start:dev
-
-# production mode
-$ npm run start:prod
+cp .env.example .env
 ```
 
-## Run tests
+Refer to `.env.example` for the required keys.
+
+### 2. Installation
 
 ```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
+npm install
 ```
 
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+### 3. Running the App
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+# Development mode
+npm run start:dev
+
+# Production mode
+npm run start:prod
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+### 4. Documentation
+For detailed API usage, refer to [API_DOCUMENTATION.md](./API_DOCUMENTATION.md).

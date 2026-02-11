@@ -4,8 +4,10 @@ import { SearchService } from './search.service';
 import { CypherBuilderService } from './cypher-builder.service';
 import { QueryParserChain } from '../ai/chains/query-parser.chain';
 import { ResultFormatterChain } from '../ai/chains/result-formatter.chain';
+import { AuthModule } from '../auth/auth.module';
 
 @Module({
+  imports: [AuthModule],
   controllers: [SearchController],
   providers: [
     SearchService,
@@ -15,4 +17,4 @@ import { ResultFormatterChain } from '../ai/chains/result-formatter.chain';
   ],
   exports: [SearchService],
 })
-export class SearchModule {}
+export class SearchModule { }

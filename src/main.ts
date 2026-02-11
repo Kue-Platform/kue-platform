@@ -18,7 +18,14 @@ async function bootstrap() {
 
   const configService = app.get(ConfigService);
 
-  app.enableCors();
+  // Configure CORS to allow credentials (cookies)
+  app.enableCors({
+    origin: configService.get<string>('FRONTEND_URL') || 'http://localhost:8081',
+    credentials: true,
+  });
+
+  // Register cookie support for session management
+  await app.register(require('@fastify/cookie') as any);
 
   // Register multipart for file uploads (LinkedIn CSV import)
   await app.register(

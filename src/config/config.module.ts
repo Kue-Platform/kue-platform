@@ -22,6 +22,10 @@ const envSchema = z.object({
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_REDIRECT_URI: z.string().default('http://localhost:3000/auth/callback'),
+  GOOGLE_CALLBACK_URL: z.string().default('http://localhost:3000/auth/google/callback'),
+
+  SESSION_SECRET: z.string(),
+  FRONTEND_URL: z.string().default('http://localhost:8081'),
 
   INNGEST_EVENT_KEY: z.string().optional(),
   INNGEST_SIGNING_KEY: z.string().optional(),
@@ -40,6 +44,8 @@ const envSchema = z.object({
 
   GRAFANA_OTLP_ENDPOINT: z.string().optional(),
   GRAFANA_OTLP_TOKEN: z.string().optional(),
+
+  ENRICHMENT_API_KEY: z.string().optional(),
 });
 
 @Module({
@@ -57,4 +63,4 @@ const envSchema = z.object({
     }),
   ],
 })
-export class ConfigModule {}
+export class ConfigModule { }
