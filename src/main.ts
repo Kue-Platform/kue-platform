@@ -25,7 +25,7 @@ async function bootstrap() {
       'http://localhost:8081',
       'https://kue-prototype.vercel.app',
       'https://kue-platform.vercel.app',
-    ].filter((origin) => !!origin),
+    ].filter((origin): origin is string => !!origin),
     credentials: true,
   });
 
