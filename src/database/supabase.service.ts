@@ -43,7 +43,7 @@ export class SupabaseService implements OnModuleInit {
   async verifyConnectivity(): Promise<boolean> {
     if (!this.client) return false;
     try {
-      const { error } = await this.client.from('profiles').select('id').limit(0);
+      const { error } = await this.client.from('tenants').select('tenant_id').limit(0);
       return !error;
     } catch {
       return false;

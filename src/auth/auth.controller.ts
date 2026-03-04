@@ -36,26 +36,29 @@ export class AuthController {
   @Public()
   @ApiOperation({ summary: 'Send OTP verification code to email (works for new and existing users)' })
   @ApiBody({ type: SendOtpDto })
-  async sendOtp(@Body() dto: SendOtpDto) {
+  async sendOtp(
+    @Body() dto: SendOtpDto,
+    @Res({ passthrough: false }) reply: FastifyReply,
+  ) {
     try {
       const result = await this.authService.sendOtp(dto.email);
-      return {
+      return reply.status(HttpStatus.OK).send({
         statusCode: HttpStatus.OK,
         message: result.message,
         data: {
           email: dto.email,
           expiresIn: 3600, // 1 hour in seconds
         },
-      };
+      });
     } catch (error) {
       this.logger.error('Failed to send OTP', {
         email: dto.email,
         error: error instanceof Error ? error.message : String(error),
       });
-      return {
+      return reply.status(HttpStatus.INTERNAL_SERVER_ERROR).send({
         statusCode: HttpStatus.INTERNAL_SERVER_ERROR,
         message: 'Failed to send verification code',
-      };
+      });
     }
   }
 
@@ -131,31 +134,34 @@ export class AuthController {
   @Get('session')
   @Public()
   @ApiOperation({ summary: 'Get current session user' })
-  async getSession(@Req() request: FastifyRequest) {
+  async getSession(
+    @Req() request: FastifyRequest,
+    @Res({ passthrough: false }) reply: FastifyReply,
+  ) {
     const sessionToken = request.cookies?.session;
 
     if (!sessionToken) {
-      return {
+      return reply.status(HttpStatus.UNAUTHORIZED).send({
         statusCode: HttpStatus.UNAUTHORIZED,
         message: 'No session found',
         data: { user: null },
-      };
+      });
     }
 
     const user = this.sessionService.verifySessionToken(sessionToken);
 
     if (!user) {
-      return {
+      return reply.status(HttpStatus.UNAUTHORIZED).send({
         statusCode: HttpStatus.UNAUTHORIZED,
         message: 'Invalid or expired session',
         data: { user: null },
-      };
+      });
     }
 
-    return {
+    return reply.status(HttpStatus.OK).send({
       statusCode: HttpStatus.OK,
       data: { user },
-    };
+    });
   }
 
   @Post('logout')
@@ -235,11 +241,11 @@ export class AuthController {
   // ==================== Google OAuth (Data Sync) ====================
 
   @Get('google')
-  @Public()
+  @UseGuards(AuthGuard)
+  @ApiBearerAuth()
   @ApiOperation({ summary: 'Get Google OAuth consent URL for data sync (Gmail/Calendar/Contacts)' })
-  @ApiQuery({ name: 'state', required: false, description: 'Optional state parameter (user ID or redirect URL)' })
-  getGoogleAuthUrl(@Query('state') state?: string) {
-    const url = this.authService.getGoogleAuthUrl(state);
+  getGoogleAuthUrl(@CurrentUser() user: AuthenticatedUser) {
+    const url = this.authService.getGoogleAuthUrl(user.id);
     return { url };
   }
 
@@ -263,13 +269,18 @@ export class AuthController {
     if (!state) {
       return reply.status(HttpStatus.BAD_REQUEST).send({
         statusCode: HttpStatus.BAD_REQUEST,
-        message: 'Missing state parameter (user ID)',
+        message: 'Missing state parameter',
       });
     }
 
     try {
-      // The state parameter should contain the user ID
-      const userId = state;
+      const userId = this.sessionService.verifyGoogleOAuthStateToken(state);
+      if (!userId) {
+        return reply.status(HttpStatus.BAD_REQUEST).send({
+          statusCode: HttpStatus.BAD_REQUEST,
+          message: 'Invalid or expired state parameter',
+        });
+      }
       const tokens = await this.authService.handleGoogleCallback(code, userId);
 
       this.logger.info('OAuth callback successful', { userId });

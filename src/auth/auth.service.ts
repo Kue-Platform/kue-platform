@@ -6,6 +6,7 @@ import { LoggerService } from '../observability/logger.service';
 import { PosthogService } from '../observability/posthog.service';
 import { SentryService } from '../observability/sentry.service';
 import { PostHogEvents } from '../common/types/events';
+import { SessionService } from './session.service';
 
 export interface GoogleTokens {
   accessToken: string;
@@ -21,6 +22,7 @@ const GOOGLE_SCOPES = [
   'https://www.googleapis.com/auth/userinfo.email',
   'https://www.googleapis.com/auth/userinfo.profile',
 ];
+const GOOGLE_SOURCES = ['gmail', 'google_contacts', 'google_calendar'] as const;
 
 @Injectable()
 export class AuthService {
@@ -32,6 +34,7 @@ export class AuthService {
     private readonly logger: LoggerService,
     private readonly posthog: PosthogService,
     private readonly sentry: SentryService,
+    private readonly sessionService: SessionService,
   ) {
     this.oauth2Client = new google.auth.OAuth2(
       this.config.get<string>('GOOGLE_CLIENT_ID'),
@@ -121,6 +124,15 @@ export class AuthService {
         });
       }
 
+      try {
+        await this.ensureTenantMembership(data.user.id, data.user.email || email);
+      } catch (tenantError) {
+        this.logger.warn('Tenant provisioning skipped during OTP login', {
+          userId: data.user.id,
+          error: tenantError instanceof Error ? tenantError.message : String(tenantError),
+        });
+      }
+
       return {
         accessToken: data.session.access_token,
         refreshToken: data.session.refresh_token,
@@ -182,6 +194,15 @@ export class AuthService {
         this.posthog.capture(user.id, PostHogEvents.USER_SIGNED_IN, {
           email: user.email,
           method: 'oauth_google',
+        });
+      }
+
+      try {
+        await this.ensureTenantMembership(user.id, user.email || '');
+      } catch (tenantError) {
+        this.logger.warn('Tenant provisioning skipped during session exchange', {
+          userId: user.id,
+          error: tenantError instanceof Error ? tenantError.message : String(tenantError),
         });
       }
 
@@ -254,12 +275,13 @@ export class AuthService {
   /**
    * Generate the Google OAuth consent URL (for data sync)
    */
-  getGoogleAuthUrl(state?: string): string {
+  getGoogleAuthUrl(userId: string): string {
+    const stateToken = this.sessionService.createGoogleOAuthStateToken(userId);
     const url = this.oauth2Client.generateAuthUrl({
       access_type: 'offline',
       prompt: 'consent',
       scope: GOOGLE_SCOPES,
-      state,
+      state: stateToken,
     });
 
     this.logger.info('Generated Google OAuth URL');
@@ -291,31 +313,52 @@ export class AuthService {
       this.oauth2Client.setCredentials(tokens);
       const oauth2 = google.oauth2({ version: 'v2', auth: this.oauth2Client });
       const { data: profile } = await oauth2.userinfo.get();
+      const tenantId = this.getDefaultTenantId(userId);
+      await this.ensureTenantMembership(userId, profile.email || undefined, profile.name || undefined);
 
-      // Upsert connected account in Supabase
-      const { error } = await this.supabase.getClient()
-        .from('connected_accounts')
+      // Keep one Google connection set per user for auth-only scope.
+      const { error: deleteError } = await this.supabase.getClient()
+        .from('source_connections')
+        .delete()
+        .eq('tenant_id', tenantId)
+        .eq('user_id', userId)
+        .in('source', [...GOOGLE_SOURCES]);
+
+      if (deleteError) {
+        this.logger.error('Failed to clean existing Google connection', {
+          userId,
+          error: deleteError.message,
+        });
+        throw new Error(`Failed to prepare Google connection: ${deleteError.message}`);
+      }
+
+      const { error: insertError } = await this.supabase.getClient()
+        .from('source_connections')
         .upsert(
-          {
+          GOOGLE_SOURCES.map(source => ({
+            tenant_id: tenantId,
             user_id: userId,
-            provider: 'google',
-            provider_account_id: profile.id || profile.email || 'unknown',
-            access_token: googleTokens.accessToken,
-            refresh_token: googleTokens.refreshToken,
-            token_expires_at: googleTokens.expiresAt.toISOString(),
-            scopes: googleTokens.scopes,
-            metadata: {
-              email: profile.email,
-              name: profile.name,
-              picture: profile.picture,
+            source,
+            external_account_id: profile.id || profile.email || 'unknown',
+            token_json: {
+              access_token: googleTokens.accessToken,
+              refresh_token: googleTokens.refreshToken,
+              expires_at: googleTokens.expiresAt.toISOString(),
+              scopes: googleTokens.scopes,
+              profile: {
+                email: profile.email,
+                name: profile.name,
+                picture: profile.picture,
+              },
             },
-          },
-          { onConflict: 'user_id,provider,provider_account_id' },
+            status: 'active',
+          })),
+          { onConflict: 'tenant_id,user_id,source,external_account_id' },
         );
 
-      if (error) {
-        this.logger.error('Failed to store connected account', { error: error.message });
-        throw new Error(`Failed to store tokens: ${error.message}`);
+      if (insertError) {
+        this.logger.error('Failed to store connected account', { error: insertError.message });
+        throw new Error(`Failed to store tokens: ${insertError.message}`);
       }
 
       this.posthog.capture(userId, PostHogEvents.PLATFORM_CONNECTED, {
@@ -343,14 +386,20 @@ export class AuthService {
    * Get a valid OAuth2 client for a user, refreshing tokens if needed
    */
   async getAuthenticatedClient(userId: string): Promise<Auth.OAuth2Client> {
+    const tenantId = this.getDefaultTenantId(userId);
     const { data, error } = await this.supabase.getClient()
-      .from('connected_accounts')
+      .from('source_connections')
       .select('*')
+      .eq('tenant_id', tenantId)
       .eq('user_id', userId)
-      .eq('provider', 'google')
-      .single();
+      .in('source', [...GOOGLE_SOURCES])
+      .eq('status', 'active')
+      .order('updated_at', { ascending: false })
+      .limit(1);
 
-    if (error || !data) {
+    const account = data?.[0];
+
+    if (error || !account) {
       throw new UnauthorizedException('Google account not connected');
     }
 
@@ -359,30 +408,43 @@ export class AuthService {
       this.config.get<string>('GOOGLE_CLIENT_SECRET'),
       this.config.get<string>('GOOGLE_REDIRECT_URI'),
     );
+    const tokenJson = (account.token_json ?? {}) as {
+      access_token?: string;
+      refresh_token?: string;
+      expires_at?: string;
+    };
 
     client.setCredentials({
-      access_token: data.access_token,
-      refresh_token: data.refresh_token,
+      access_token: tokenJson.access_token,
+      refresh_token: tokenJson.refresh_token,
     });
 
     // Check if token is expired or about to expire (within 5 min)
-    const expiresAt = new Date(data.token_expires_at);
+    const expiresAt = tokenJson.expires_at
+      ? new Date(tokenJson.expires_at)
+      : new Date(Date.now() + 60 * 60 * 1000);
     const isExpiring = expiresAt.getTime() - Date.now() < 5 * 60 * 1000;
 
-    if (isExpiring && data.refresh_token) {
+    if (isExpiring && tokenJson.refresh_token) {
       try {
         const { credentials } = await client.refreshAccessToken();
 
         // Update stored tokens
+        const updatedTokenJson = {
+          ...tokenJson,
+          access_token: credentials.access_token,
+          expires_at: new Date(
+            credentials.expiry_date || Date.now() + 3600 * 1000,
+          ).toISOString(),
+        };
+
         await this.supabase.getClient()
-          .from('connected_accounts')
+          .from('source_connections')
           .update({
-            access_token: credentials.access_token,
-            token_expires_at: new Date(
-              credentials.expiry_date || Date.now() + 3600 * 1000,
-            ).toISOString(),
+            token_json: updatedTokenJson,
+            status: 'active',
           })
-          .eq('id', data.id);
+          .eq('id', account.id);
 
         this.logger.info('Refreshed Google tokens', { userId });
       } catch (refreshError) {
@@ -401,25 +463,30 @@ export class AuthService {
    * Check if a user has a connected Google account
    */
   async hasGoogleConnection(userId: string): Promise<boolean> {
+    const tenantId = this.getDefaultTenantId(userId);
     const { data, error } = await this.supabase.getClient()
-      .from('connected_accounts')
+      .from('source_connections')
       .select('id')
+      .eq('tenant_id', tenantId)
       .eq('user_id', userId)
-      .eq('provider', 'google')
-      .single();
+      .in('source', [...GOOGLE_SOURCES])
+      .eq('status', 'active')
+      .limit(1);
 
-    return !error && !!data;
+    return !error && !!data?.length;
   }
 
   /**
    * Disconnect a Google account
    */
   async disconnectGoogle(userId: string): Promise<void> {
+    const tenantId = this.getDefaultTenantId(userId);
     const { error } = await this.supabase.getClient()
-      .from('connected_accounts')
-      .delete()
+      .from('source_connections')
+      .update({ status: 'revoked' })
+      .eq('tenant_id', tenantId)
       .eq('user_id', userId)
-      .eq('provider', 'google');
+      .in('source', [...GOOGLE_SOURCES]);
 
     if (error) {
       this.logger.error('Failed to disconnect Google', { userId, error: error.message });
@@ -427,5 +494,54 @@ export class AuthService {
     }
 
     this.logger.info('Google account disconnected', { userId });
+  }
+
+  private getDefaultTenantId(userId: string): string {
+    return `tenant_${userId}`;
+  }
+
+  private async ensureTenantMembership(
+    userId: string,
+    email?: string,
+    displayName?: string,
+  ): Promise<void> {
+    const tenantId = this.getDefaultTenantId(userId);
+    const tenantName = email ? `${email.split('@')[0]}'s workspace` : 'My Workspace';
+
+    const { error: tenantError } = await this.supabase.getClient()
+      .from('tenants')
+      .upsert(
+        {
+          tenant_id: tenantId,
+          name: tenantName,
+          plan: 'free',
+          settings_json: {},
+        },
+        { onConflict: 'tenant_id' },
+      );
+
+    if (tenantError) {
+      this.logger.error('Failed to upsert tenant', { userId, error: tenantError.message });
+      throw new Error(`Failed to initialize tenant: ${tenantError.message}`);
+    }
+
+    const { error: membershipError } = await this.supabase.getClient()
+      .from('tenant_users')
+      .upsert(
+        {
+          tenant_id: tenantId,
+          user_id: userId,
+          email: email || '',
+          display_name: displayName || email || 'User',
+          role: 'admin',
+          status: 'active',
+        },
+        { onConflict: 'tenant_id,user_id' },
+      );
+
+    if (membershipError) {
+      this.logger.error('Failed to upsert tenant user', { userId, error: membershipError.message });
+      throw new Error(`Failed to initialize tenant user: ${membershipError.message}`);
+    }
   }
 }

@@ -16,13 +16,10 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
-    "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
-    "test:e2e": "jest --config ./test/jest-e2e.json",
-    "seed:neo4j": "ts-node scripts/seed-neo4j.ts"
+    "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand"
   },
   "dependencies": {
     "@fastify/cookie": "^11.0.2",
-    "@fastify/multipart": "^9.4.0",
     "@fastify/static": "^9.0.0",
     "@langchain/anthropic": "^0.3",
     "@langchain/core": "^0.3",

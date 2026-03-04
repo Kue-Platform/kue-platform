@@ -9,6 +9,7 @@ export interface SessionPayload {
     email: string;
     name?: string;
     avatar_url?: string;
+    purpose?: string;
     iat?: number;
     exp?: number;
 }
@@ -24,6 +25,7 @@ export interface SessionUser {
 export class SessionService {
     private readonly secret: string;
     private readonly expiresIn: string = '7d';
+    private readonly oauthStateExpiresIn: string = '10m';
 
     constructor(
         private readonly config: ConfigService,
@@ -88,6 +90,35 @@ export class SessionService {
     decodeToken(token: string): SessionPayload | null {
         try {
             return jwt.decode(token) as SessionPayload;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Create short-lived OAuth state token for Google connect callback CSRF protection.
+     */
+    createGoogleOAuthStateToken(userId: string): string {
+        return jwt.sign(
+            {
+                sub: userId,
+                purpose: 'google_connect',
+            } as SessionPayload,
+            this.secret,
+            { expiresIn: this.oauthStateExpiresIn } as SignOptions,
+        );
+    }
+
+    /**
+     * Verify OAuth state token and return user id when valid.
+     */
+    verifyGoogleOAuthStateToken(token: string): string | null {
+        try {
+            const payload = jwt.verify(token, this.secret) as SessionPayload;
+            if (payload.purpose !== 'google_connect' || !payload.sub) {
+                return null;
+            }
+            return payload.sub;
         } catch {
             return null;
         }

@@ -1,164 +1,107 @@
--- Kue Platform Initial Schema
--- Supabase PostgreSQL: user accounts, auth, settings, sync jobs
+-- Kue Platform Multi-Tenant Auth Schema
 
 -- ============================================================
--- 1. PROFILES — extends Supabase auth.users
+-- 0. ENUM TYPES
 -- ============================================================
-CREATE TABLE IF NOT EXISTS public.profiles (
-  id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
-  email TEXT NOT NULL,
-  full_name TEXT,
-  avatar_url TEXT,
-  plan TEXT NOT NULL DEFAULT 'free' CHECK (plan IN ('free', 'pro', 'team')),
-  onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE,
-  settings JSONB NOT NULL DEFAULT '{}'::jsonb,
+DO $$ BEGIN
+  CREATE TYPE public.source_connection_source AS ENUM (
+    'google_contacts',
+    'gmail',
+    'google_calendar',
+    'linkedin',
+    'twitter',
+    'csv_import'
+  );
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+  CREATE TYPE public.source_connection_status AS ENUM (
+    'active',
+    'revoked',
+    'error'
+  );
+EXCEPTION
+  WHEN duplicate_object THEN null;
+END $$;
+
+-- ============================================================
+-- 1. TENANTS (Org/Workspace)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS public.tenants (
+  tenant_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  plan TEXT NOT NULL DEFAULT 'free',
+  settings_json JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- Auto-create profile on new user signup
-CREATE OR REPLACE FUNCTION public.handle_new_user()
-RETURNS TRIGGER AS $$
-BEGIN
-  INSERT INTO public.profiles (id, email, full_name, avatar_url)
-  VALUES (
-    NEW.id,
-    NEW.email,
-    COALESCE(NEW.raw_user_meta_data->>'full_name', ''),
-    COALESCE(NEW.raw_user_meta_data->>'avatar_url', '')
-  );
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
-DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
-CREATE TRIGGER on_auth_user_created
-  AFTER INSERT ON auth.users
-  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
-
 -- ============================================================
--- 2. CONNECTED ACCOUNTS — OAuth tokens for Gmail, Calendar, LinkedIn
+-- 2. TENANT USERS (membership)
 -- ============================================================
-CREATE TABLE IF NOT EXISTS public.connected_accounts (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-  provider TEXT NOT NULL CHECK (provider IN ('google', 'linkedin')),
-  provider_account_id TEXT NOT NULL,
-  access_token TEXT NOT NULL,
-  refresh_token TEXT,
-  token_expires_at TIMESTAMPTZ,
-  scopes TEXT[] NOT NULL DEFAULT '{}',
-  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+CREATE TABLE IF NOT EXISTS public.tenant_users (
+  tenant_id TEXT NOT NULL REFERENCES public.tenants(tenant_id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL,
+  email TEXT NOT NULL,
+  display_name TEXT,
+  role TEXT NOT NULL DEFAULT 'member',
+  status TEXT NOT NULL DEFAULT 'active',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE(user_id, provider, provider_account_id)
+  PRIMARY KEY (tenant_id, user_id)
 );
 
-CREATE INDEX idx_connected_accounts_user ON public.connected_accounts(user_id);
+CREATE INDEX IF NOT EXISTS idx_tenant_users_user_id ON public.tenant_users(user_id);
 
 -- ============================================================
--- 3. SYNC JOBS — track data pipeline runs
+-- 3. SOURCE CONNECTIONS (OAuth tokens per user/source)
 -- ============================================================
-CREATE TABLE IF NOT EXISTS public.sync_jobs (
+CREATE TABLE IF NOT EXISTS public.source_connections (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-  job_type TEXT NOT NULL CHECK (job_type IN (
-    'gmail_contacts', 'gmail_messages', 'google_contacts',
-    'google_calendar', 'linkedin_connections', 'csv_import',
-    'enrichment', 'full_sync'
-  )),
-  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
-    'pending', 'running', 'completed', 'failed', 'cancelled'
-  )),
-  progress INTEGER NOT NULL DEFAULT 0 CHECK (progress >= 0 AND progress <= 100),
-  total_items INTEGER DEFAULT 0,
-  processed_items INTEGER DEFAULT 0,
-  error_message TEXT,
-  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-  started_at TIMESTAMPTZ,
-  completed_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  source public.source_connection_source NOT NULL,
+  external_account_id TEXT NOT NULL,
+  token_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  status public.source_connection_status NOT NULL DEFAULT 'active',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT fk_source_connections_tenant_user
+    FOREIGN KEY (tenant_id, user_id)
+    REFERENCES public.tenant_users(tenant_id, user_id)
+    ON DELETE CASCADE,
+  CONSTRAINT uq_source_connections_identity
+    UNIQUE (tenant_id, user_id, source, external_account_id)
 );
 
-CREATE INDEX idx_sync_jobs_user ON public.sync_jobs(user_id);
-CREATE INDEX idx_sync_jobs_status ON public.sync_jobs(status);
-CREATE INDEX idx_sync_jobs_user_type ON public.sync_jobs(user_id, job_type);
+CREATE INDEX IF NOT EXISTS idx_source_connections_tenant_user
+  ON public.source_connections(tenant_id, user_id);
+
+CREATE INDEX IF NOT EXISTS idx_source_connections_status
+  ON public.source_connections(status);
 
 -- ============================================================
--- 4. SEARCH HISTORY — recent user queries
+-- 4. SYNC CHECKPOINTS (cursor state)
 -- ============================================================
-CREATE TABLE IF NOT EXISTS public.search_history (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-  query TEXT NOT NULL,
-  query_type TEXT NOT NULL DEFAULT 'general',
-  result_count INTEGER DEFAULT 0,
-  filters JSONB NOT NULL DEFAULT '{}'::jsonb,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+CREATE TABLE IF NOT EXISTS public.sync_checkpoints (
+  tenant_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  source public.source_connection_source NOT NULL,
+  cursor_value TEXT,
+  cursor_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (tenant_id, user_id, source),
+  CONSTRAINT fk_sync_checkpoints_tenant_user
+    FOREIGN KEY (tenant_id, user_id)
+    REFERENCES public.tenant_users(tenant_id, user_id)
+    ON DELETE CASCADE
 );
 
-CREATE INDEX idx_search_history_user ON public.search_history(user_id);
-CREATE INDEX idx_search_history_created ON public.search_history(created_at DESC);
-
 -- ============================================================
--- 5. NOTIFICATIONS — user notifications
--- ============================================================
-CREATE TABLE IF NOT EXISTS public.notifications (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES public.profiles(id) ON DELETE CASCADE,
-  type TEXT NOT NULL CHECK (type IN (
-    'sync_complete', 'sync_failed', 'new_connection',
-    'enrichment_complete', 'system'
-  )),
-  title TEXT NOT NULL,
-  body TEXT,
-  read BOOLEAN NOT NULL DEFAULT FALSE,
-  metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE INDEX idx_notifications_user ON public.notifications(user_id);
-CREATE INDEX idx_notifications_unread ON public.notifications(user_id, read) WHERE read = FALSE;
-
--- ============================================================
--- 6. ROW LEVEL SECURITY (RLS)
--- ============================================================
-
--- Enable RLS on all tables
-ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.connected_accounts ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.sync_jobs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.search_history ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.notifications ENABLE ROW LEVEL SECURITY;
-
--- Profiles: users can only read/update their own profile
-CREATE POLICY profiles_select ON public.profiles
-  FOR SELECT USING (auth.uid() = id);
-CREATE POLICY profiles_update ON public.profiles
-  FOR UPDATE USING (auth.uid() = id);
-
--- Connected accounts: users can only manage their own
-CREATE POLICY connected_accounts_all ON public.connected_accounts
-  FOR ALL USING (auth.uid() = user_id);
-
--- Sync jobs: users can view their own jobs
-CREATE POLICY sync_jobs_select ON public.sync_jobs
-  FOR SELECT USING (auth.uid() = user_id);
-CREATE POLICY sync_jobs_insert ON public.sync_jobs
-  FOR INSERT WITH CHECK (auth.uid() = user_id);
-
--- Search history: users can manage their own
-CREATE POLICY search_history_all ON public.search_history
-  FOR ALL USING (auth.uid() = user_id);
-
--- Notifications: users can read/update their own
-CREATE POLICY notifications_select ON public.notifications
-  FOR SELECT USING (auth.uid() = user_id);
-CREATE POLICY notifications_update ON public.notifications
-  FOR UPDATE USING (auth.uid() = user_id);
-
--- ============================================================
--- 7. UPDATED_AT TRIGGER
+-- 5. UPDATED_AT TRIGGER
 -- ============================================================
 CREATE OR REPLACE FUNCTION public.update_updated_at()
 RETURNS TRIGGER AS $$
@@ -168,10 +111,56 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER profiles_updated_at
-  BEFORE UPDATE ON public.profiles
+DROP TRIGGER IF EXISTS tenants_updated_at ON public.tenants;
+CREATE TRIGGER tenants_updated_at
+  BEFORE UPDATE ON public.tenants
   FOR EACH ROW EXECUTE FUNCTION public.update_updated_at();
 
-CREATE TRIGGER connected_accounts_updated_at
-  BEFORE UPDATE ON public.connected_accounts
+DROP TRIGGER IF EXISTS tenant_users_updated_at ON public.tenant_users;
+CREATE TRIGGER tenant_users_updated_at
+  BEFORE UPDATE ON public.tenant_users
   FOR EACH ROW EXECUTE FUNCTION public.update_updated_at();
+
+DROP TRIGGER IF EXISTS source_connections_updated_at ON public.source_connections;
+CREATE TRIGGER source_connections_updated_at
+  BEFORE UPDATE ON public.source_connections
+  FOR EACH ROW EXECUTE FUNCTION public.update_updated_at();
+
+DROP TRIGGER IF EXISTS sync_checkpoints_updated_at ON public.sync_checkpoints;
+CREATE TRIGGER sync_checkpoints_updated_at
+  BEFORE UPDATE ON public.sync_checkpoints
+  FOR EACH ROW EXECUTE FUNCTION public.update_updated_at();
+
+-- ============================================================
+-- 6. RLS POLICIES
+-- ============================================================
+ALTER TABLE public.tenants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tenant_users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.source_connections ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.sync_checkpoints ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS tenants_select ON public.tenants;
+CREATE POLICY tenants_select ON public.tenants
+  FOR SELECT USING (
+    EXISTS (
+      SELECT 1
+      FROM public.tenant_users tu
+      WHERE tu.tenant_id = tenants.tenant_id
+        AND tu.user_id = auth.uid()::text
+    )
+  );
+
+DROP POLICY IF EXISTS tenant_users_all ON public.tenant_users;
+CREATE POLICY tenant_users_all ON public.tenant_users
+  FOR ALL USING (user_id = auth.uid()::text)
+  WITH CHECK (user_id = auth.uid()::text);
+
+DROP POLICY IF EXISTS source_connections_all ON public.source_connections;
+CREATE POLICY source_connections_all ON public.source_connections
+  FOR ALL USING (user_id = auth.uid()::text)
+  WITH CHECK (user_id = auth.uid()::text);
+
+DROP POLICY IF EXISTS sync_checkpoints_all ON public.sync_checkpoints;
+CREATE POLICY sync_checkpoints_all ON public.sync_checkpoints
+  FOR ALL USING (user_id = auth.uid()::text)
+  WITH CHECK (user_id = auth.uid()::text);

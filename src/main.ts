@@ -1,4 +1,3 @@
-import './instrument';
 import { NestFactory } from '@nestjs/core';
 import {
   FastifyAdapter,
@@ -8,7 +7,6 @@ import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { AppModule } from './app.module';
-import { setAppInstance } from './inngest/inngest-app.context';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestFastifyApplication>(
@@ -32,12 +30,6 @@ async function bootstrap() {
   // Register cookie support for session management
   await app.register(require('@fastify/cookie') as any);
 
-  // Register multipart for file uploads (LinkedIn CSV import)
-  await app.register(
-    require('@fastify/multipart') as any,
-    { limits: { fileSize: 10 * 1024 * 1024 } }, // 10MB max
-  );
-
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -54,9 +46,6 @@ async function bootstrap() {
     .build();
   const document = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('api/docs', app, document);
-
-  // Make the NestJS app instance available to Inngest functions
-  setAppInstance(app);
 
   const port = configService.get<number>('PORT', 3000);
   await app.listen(port, '0.0.0.0');
