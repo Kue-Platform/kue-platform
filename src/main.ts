@@ -20,6 +20,7 @@ async function bootstrap() {
   app.enableCors({
     origin: [
       configService.get<string>('FRONTEND_URL'),
+      'https://kue-prototype-eight.vercel.app',
       'http://localhost:8081',
       'https://kue-prototype.vercel.app',
       'https://kue-platform.vercel.app',
