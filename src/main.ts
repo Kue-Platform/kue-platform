@@ -21,7 +21,7 @@ async function bootstrap() {
     origin: [
       configService.get<string>('FRONTEND_URL'),
       'https://kue-prototype-eight.vercel.app',
-      'https://localhost:3000',
+      'http://localhost:3000',
       'http://localhost:8081',
       'https://kue-prototype.vercel.app',
       'https://kue-platform.vercel.app',
